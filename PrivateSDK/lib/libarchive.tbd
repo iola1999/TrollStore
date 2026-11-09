@@ -1,0 +1,19 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-ios, arm64e-ios ]
+install-name:    '/usr/lib/libarchive.2.dylib'
+exports:
+  - targets:         [ arm64-ios, arm64e-ios ]
+    symbols:         [ _archive_entry_pathname, _archive_entry_set_pathname,
+                       _archive_entry_size, _archive_error_string,
+                       _archive_read_close, _archive_read_data,
+                       _archive_read_data_block, _archive_read_free, _archive_read_new,
+                       _archive_read_next_header, _archive_read_open_filename,
+                       _archive_read_support_filter_all,
+                       _archive_read_support_format_all, _archive_write_close,
+                       _archive_write_data_block, _archive_write_disk_new,
+                       _archive_write_disk_set_options,
+                       _archive_write_disk_set_standard_lookup,
+                       _archive_write_finish_entry, _archive_write_free,
+                       _archive_write_header ]
+...

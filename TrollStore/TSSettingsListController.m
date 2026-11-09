@@ -35,36 +35,7 @@ extern NSUserDefaults* trollStoreUserDefaults(void);
 		}
 	});
 
-	//if (@available(iOS 16, *)) {} else {
-		fetchLatestLdidVersion(^(NSString* latestVersion)
-		{
-			NSString* ldidVersionPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"ldid.version"];
-			NSString* ldidVersion = nil;
-			NSData* ldidVersionData = [NSData dataWithContentsOfFile:ldidVersionPath];
-			if(ldidVersionData)
-			{
-				ldidVersion = [[NSString alloc] initWithData:ldidVersionData encoding:NSUTF8StringEncoding];
-			}
-			
-			if(![latestVersion isEqualToString:ldidVersion])
-			{
-				_newerLdidVersion = latestVersion;
-				dispatch_async(dispatch_get_main_queue(), ^
-				{
-					[self reloadSpecifiers];
-				});
-			}
-		});
-	//}
-
-	if (@available(iOS 16, *))
-	{
-		_devModeEnabled = spawnRoot(rootHelperPath(), @[@"check-dev-mode"], nil, nil) == 0;
-	}
-	else
-	{
-		_devModeEnabled = YES;
-	}
+	_devModeEnabled = YES;
 #endif
 	[self reloadSpecifiers];
 }
@@ -192,13 +163,15 @@ extern NSUserDefaults* trollStoreUserDefaults(void);
 		//if (@available(iOS 16, *)) { } else {
 			NSString* ldidPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"ldid"];
 			NSString* ldidVersionPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"ldid.version"];
-			BOOL ldidInstalled = [[NSFileManager defaultManager] fileExistsAtPath:ldidPath];
+			BOOL ldidInstalled = YES;
 
-			NSString* ldidVersion = nil;
-			NSData* ldidVersionData = [NSData dataWithContentsOfFile:ldidVersionPath];
-			if(ldidVersionData)
-			{
-				ldidVersion = [[NSString alloc] initWithData:ldidVersionData encoding:NSUTF8StringEncoding];
+			NSString* ldidVersion = @"Built-in";
+			if ([[NSFileManager defaultManager] fileExistsAtPath:ldidPath]) {
+				NSData* ldidVersionData = [NSData dataWithContentsOfFile:ldidVersionPath];
+				if(ldidVersionData)
+				{
+					ldidVersion = [[NSString alloc] initWithData:ldidVersionData encoding:NSUTF8StringEncoding];
+				}
 			}
 
 			PSSpecifier* signingGroupSpecifier = [PSSpecifier emptyGroupSpecifier];

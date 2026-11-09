@@ -1,6 +1,6 @@
 extern NSString *LSInstallTypeKey;
 
-@interface LSBundleProxy
+@interface LSBundleProxy : NSObject
 @property (nonatomic,readonly) NSString * bundleIdentifier;
 @property (nonatomic) NSURL* dataContainerURL;
 @property (nonatomic,readonly) NSURL* bundleContainerURL;
@@ -27,7 +27,9 @@ extern NSString *LSInstallTypeKey;
 - (BOOL)registerApplicationDictionary:(NSDictionary*)dict;
 - (BOOL)unregisterApplication:(id)arg1;
 - (BOOL)_LSPrivateRebuildApplicationDatabasesForSystemApps:(BOOL)arg1 internal:(BOOL)arg2 user:(BOOL)arg3;
-- (BOOL)openApplicationWithBundleID:(NSString *)arg1 ;
+- (BOOL)openApplicationWithBundleID:(NSString *)arg1;
+- (BOOL)openURL:(NSURL *)url;
+- (BOOL)openSensitiveURL:(NSURL *)url withOptions:(NSDictionary *)options;
 - (void)enumerateApplicationsOfType:(NSUInteger)type block:(void (^)(LSApplicationProxy*))block;
 - (BOOL)installApplication:(NSURL*)appPackageURL withOptions:(NSDictionary*)options error:(NSError**)error;
 - (BOOL)uninstallApplication:(NSString*)appId withOptions:(NSDictionary*)options;

@@ -135,7 +135,7 @@ extern NSUserDefaults* trollStoreUserDefaults();
     [args addObject:@"uninstall"];
 
     NSNumber* uninstallationMethodToUseNum = [trollStoreUserDefaults() objectForKey:@"uninstallationMethod"];
-    int uninstallationMethodToUse = uninstallationMethodToUseNum ? uninstallationMethodToUseNum.intValue : 0;
+    int uninstallationMethodToUse = uninstallationMethodToUseNum ? uninstallationMethodToUseNum.intValue : 1;
     if(uninstallationMethodToUse == 1)
     {
         [args addObject:@"custom"];
@@ -160,7 +160,7 @@ extern NSUserDefaults* trollStoreUserDefaults();
     [args addObject:@"uninstall-path"];
 
     NSNumber* uninstallationMethodToUseNum = [trollStoreUserDefaults() objectForKey:@"uninstallationMethod"];
-    int uninstallationMethodToUse = uninstallationMethodToUseNum ? uninstallationMethodToUseNum.intValue : 0;
+    int uninstallationMethodToUse = uninstallationMethodToUseNum ? uninstallationMethodToUseNum.intValue : 1;
     if(uninstallationMethodToUse == 1)
     {
         [args addObject:@"custom"];

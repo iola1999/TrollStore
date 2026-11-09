@@ -1,5 +1,7 @@
-@import Foundation;
-@import Darwin;
+#import <Foundation/Foundation.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 @interface RBSProcessPredicate
 + (instancetype)predicateMatchingBundleIdentifier:(NSString *)bundleID;

@@ -4,6 +4,9 @@
 #import <spawn.h>
 #import <sys/sysctl.h>
 #import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <mach-o/fat.h>
+#import <arpa/inet.h>
 #import <libroot.h>
 
 static EXPLOIT_TYPE gPlatformVulnerabilities;
@@ -63,7 +66,12 @@ NSString* rootHelperPath(void)
 #else
 NSString* rootHelperPath(void)
 {
-	return [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"trollstorehelper"];
+	NSString* bundleHelper = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"trollstorehelper"];
+	if([[NSFileManager defaultManager] fileExistsAtPath:bundleHelper])
+	{
+		return bundleHelper;
+	}
+	return @"/annibale/bin/trollstorehelper";
 }
 #endif
 
@@ -525,30 +533,108 @@ NSDictionary* dumpEntitlements(SecStaticCodeRef codeRef)
 	return entitlementsNSDict;
 }
 
+static NSDictionary* parseMachOEntitlementsSlice(const uint8_t *bytes, size_t length)
+{
+	if (!bytes || length < sizeof(struct mach_header_64)) return nil;
+	uint32_t magic = *(const uint32_t *)bytes;
+	if (magic != MH_MAGIC_64) return nil;
+
+	const struct mach_header_64 *mh = (const struct mach_header_64 *)bytes;
+	size_t at = sizeof(struct mach_header_64);
+	for (uint32_t i = 0; i < mh->ncmds; i++) {
+		if (at + sizeof(struct load_command) > length) break;
+		const struct load_command *lc = (const struct load_command *)(bytes + at);
+		if (lc->cmdsize < sizeof(struct load_command) || at + lc->cmdsize > length) break;
+		if (lc->cmd == LC_CODE_SIGNATURE && lc->cmdsize >= sizeof(struct linkedit_data_command)) {
+			const struct linkedit_data_command *cs = (const struct linkedit_data_command *)lc;
+			uint32_t off = cs->dataoff;
+			uint32_t sz = cs->datasize;
+			if ((size_t)off + sz <= length && sz >= 12) {
+				const uint8_t *sb = bytes + off;
+				uint32_t sb_magic = ntohl(*(const uint32_t *)sb);
+				uint32_t sb_count = ntohl(*(const uint32_t *)(sb + 8));
+				if (sb_magic == 0xfade0cc0 && 12 + (size_t)sb_count * 8 <= sz) {
+					for (uint32_t j = 0; j < sb_count; j++) {
+						uint32_t stype = ntohl(*(const uint32_t *)(sb + 12 + j * 8));
+						uint32_t soff = ntohl(*(const uint32_t *)(sb + 16 + j * 8));
+						if (stype == 5 && (size_t)soff + 8 <= sz) {
+							uint32_t emagic = ntohl(*(const uint32_t *)(sb + soff));
+							uint32_t elen = ntohl(*(const uint32_t *)(sb + soff + 4));
+							if (emagic == 0xfade7171 && elen >= 8 && (size_t)soff + elen <= sz) {
+								NSData *xmlData = [NSData dataWithBytes:sb + soff + 8 length:elen - 8];
+								id plist = [NSPropertyListSerialization propertyListWithData:xmlData options:NSPropertyListImmutable format:NULL error:nil];
+								if ([plist isKindOfClass:[NSDictionary class]]) {
+									return plist;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		at += lc->cmdsize;
+	}
+	return nil;
+}
+
+static NSDictionary* parseMachOEntitlementsData(NSData *binaryData)
+{
+	if (!binaryData || binaryData.length < sizeof(uint32_t)) return nil;
+	const uint8_t *bytes = (const uint8_t *)binaryData.bytes;
+	size_t length = binaryData.length;
+	uint32_t magic = *(const uint32_t *)bytes;
+
+	if (magic == MH_MAGIC_64) {
+		return parseMachOEntitlementsSlice(bytes, length);
+	}
+	if (magic == FAT_CIGAM && length >= sizeof(struct fat_header)) {
+		uint32_t nfat = ntohl(((const struct fat_header *)bytes)->nfat_arch);
+		if (sizeof(struct fat_header) + (size_t)nfat * sizeof(struct fat_arch) <= length) {
+			const struct fat_arch *archs = (const struct fat_arch *)(bytes + sizeof(struct fat_header));
+			for (uint32_t i = 0; i < nfat; i++) {
+				cpu_type_t cputype = (cpu_type_t)ntohl(archs[i].cputype);
+				uint32_t offset = ntohl(archs[i].offset);
+				uint32_t size = ntohl(archs[i].size);
+				if (cputype == CPU_TYPE_ARM64 && (size_t)offset + size <= length) {
+					NSDictionary *ent = parseMachOEntitlementsSlice(bytes + offset, size);
+					if (ent) return ent;
+				}
+			}
+		}
+	}
+	return nil;
+}
+
 NSDictionary* dumpEntitlementsFromBinaryAtPath(NSString *binaryPath)
 {
-	// This function is intended for one-shot checks. Main-event functions should retain/release their own SecStaticCodeRefs
-	
 	if(binaryPath == nil)
 	{
 		return nil;
 	}
-	
+
+	NSDictionary *entitlements = parseMachOEntitlementsData([NSData dataWithContentsOfFile:binaryPath]);
+	if (entitlements) {
+		return entitlements;
+	}
+
 	SecStaticCodeRef codeRef = getStaticCodeRef(binaryPath);
 	if(codeRef == NULL)
 	{
 		return nil;
 	}
-	
-	NSDictionary *entitlements = dumpEntitlements(codeRef);
-	CFRelease(codeRef);
 
+	entitlements = dumpEntitlements(codeRef);
+	CFRelease(codeRef);
 	return entitlements;
 }
 
 NSDictionary* dumpEntitlementsFromBinaryData(NSData* binaryData)
 {
-	NSDictionary* entitlements;
+	NSDictionary* entitlements = parseMachOEntitlementsData(binaryData);
+	if(entitlements)
+	{
+		return entitlements;
+	}
 	NSString* tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
 	NSURL* tmpURL = [NSURL fileURLWithPath:tmpPath];
 	if([binaryData writeToURL:tmpURL options:NSDataWritingAtomic error:nil])

@@ -1,0 +1,10 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-ios, arm64e-ios, arm64e.x1-ios ]
+install-name:    '/System/Library/PrivateFrameworks/MobileContainerManager.framework/MobileContainerManager'
+exports:
+  - targets:         [ arm64-ios, arm64e-ios, arm64e.x1-ios ]
+    objc-classes:    [ MCMAppContainer, MCMAppDataContainer, MCMContainer,
+                       MCMDataContainer, MCMPluginKitPluginDataContainer,
+                       MCMSharedDataContainer, MCMSystemDataContainer ]
+...

@@ -76,7 +76,7 @@ extern NSUserDefaults* trollStoreUserDefaults();
 		[uninstallationMethodSegmentSpecifier setProperty:@"uninstallationMethod" forKey:@"key"];
 		uninstallationMethodSegmentSpecifier.values = @[@0, @1];
 		uninstallationMethodSegmentSpecifier.titleDictionary = @{@0 : @"installd", @1 : @"Custom"};
-		[uninstallationMethodSegmentSpecifier setProperty:@0 forKey:@"default"];
+		[uninstallationMethodSegmentSpecifier setProperty:@1 forKey:@"default"];
 		[_specifiers addObject:uninstallationMethodSegmentSpecifier];
 	}
 

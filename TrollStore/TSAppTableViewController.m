@@ -4,7 +4,7 @@
 #import <TSPresentationDelegate.h>
 #import "TSInstallationController.h"
 #import "TSUtil.h"
-@import UniformTypeIdentifiers;
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #define ICON_FORMAT_IPAD 8
 #define ICON_FORMAT_IPHONE 10

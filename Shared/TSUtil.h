@@ -1,4 +1,4 @@
-@import Foundation;
+#import <Foundation/Foundation.h>
 #import "CoreServices.h"
 
 #define TrollStoreErrorDomain @"TrollStoreErrorDomain"

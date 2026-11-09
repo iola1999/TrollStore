@@ -8,7 +8,7 @@
 #import <Foundation/Foundation.h>
 #import <archive.h>
 #import <archive_entry.h>
-@import UIKit;
+#import <UIKit/UIKit.h>
 
 @interface TSAppInfo : NSObject
 {

@@ -1,6 +1,6 @@
 #import <stdio.h>
 #import "unarchive.h"
-@import Foundation;
+#import <Foundation/Foundation.h>
 #import "uicache.h"
 #import <sys/stat.h>
 #import <dlfcn.h>
@@ -12,14 +12,10 @@
 #import <mach-o/fat.h>
 #import "devmode.h"
 #import "jit.h"
-#ifndef EMBEDDED_ROOT_HELPER
-#import "codesign.h"
-#import "coretrust_bug.h"
-#import "FAT.h"
-#import "MachO.h"
-#import "FileStream.h"
-#import "Host.h"
-#endif
+#import "sign.h"
+#include <CommonCrypto/CommonDigest.h>
+#include <notify.h>
+#include <unistd.h>
 
 #import <SpringBoardServices/SpringBoardServices.h>
 #import <FrontBoardServices/FBSSystemService.h>
@@ -103,25 +99,6 @@ NSSet<NSString*>* immutableAppBundleIdentifiers(void)
 	return systemAppIdentifiers.copy;
 }
 
-NSDictionary* infoDictionaryForAppPath(NSString* appPath)
-{
-	if(!appPath) return nil;
-	NSString* infoPlistPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
-	return [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
-}
-
-NSString* appIdForAppPath(NSString* appPath)
-{
-	if(!appPath) return nil;
-	return infoDictionaryForAppPath(appPath)[@"CFBundleIdentifier"];
-}
-
-NSString* appMainExecutablePathForAppPath(NSString* appPath)
-{
-	if(!appPath) return nil;
-	return [appPath stringByAppendingPathComponent:infoDictionaryForAppPath(appPath)[@"CFBundleExecutable"]];
-}
-
 NSString* appPathForAppId(NSString* appId)
 {
 	if(!appId) return nil;
@@ -131,6 +108,10 @@ NSString* appPathForAppId(NSString* appId)
 		{
 			return appPath;
 		}
+	}
+	LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:appId];
+	if (proxy.bundleURL.path.length > 0 && [proxy.bundleURL.path hasPrefix:@"/private/var/containers/Bundle/Application/"]) {
+		return proxy.bundleURL.path;
 	}
 	return nil;
 }
@@ -160,47 +141,6 @@ NSURL* findAppURLInBundleURL(NSURL* bundleURL)
 	NSString* appName = findAppNameInBundlePath(bundleURL.path);
 	if(!appName) return nil;
 	return [bundleURL URLByAppendingPathComponent:appName];
-}
-
-BOOL isMachoFile(NSString* filePath)
-{
-	FILE* file = fopen(filePath.fileSystemRepresentation, "r");
-	if(!file) return NO;
-
-	fseek(file, 0, SEEK_SET);
-	uint32_t magic;
-	fread(&magic, sizeof(uint32_t), 1, file);
-	fclose(file);
-
-	return magic == FAT_MAGIC || magic == FAT_CIGAM || magic == MH_MAGIC_64 || magic == MH_CIGAM_64;
-}
-
-void fixPermissionsOfAppBundle(NSString* appBundlePath)
-{
-	// Apply correct permissions (First run, set everything to 644, owner 33)
-	NSURL* fileURL;
-	NSDirectoryEnumerator *enumerator = [[NSFileManager defaultManager] enumeratorAtURL:[NSURL fileURLWithPath:appBundlePath] includingPropertiesForKeys:nil options:0 errorHandler:nil];
-	while(fileURL = [enumerator nextObject])
-	{
-		NSString* filePath = fileURL.path;
-		chown(filePath.fileSystemRepresentation, 33, 33);
-		chmod(filePath.fileSystemRepresentation, 0644);
-	}
-
-	// Apply correct permissions (Second run, set executables and directories to 0755)
-	enumerator = [[NSFileManager defaultManager] enumeratorAtURL:[NSURL fileURLWithPath:appBundlePath] includingPropertiesForKeys:nil options:0 errorHandler:nil];
-	while(fileURL = [enumerator nextObject])
-	{
-		NSString* filePath = fileURL.path;
-
-		BOOL isDir;
-		[[NSFileManager defaultManager] fileExistsAtPath:fileURL.path isDirectory:&isDir];
-
-		if(isDir || isMachoFile(filePath))
-		{
-			chmod(filePath.fileSystemRepresentation, 0755);
-		}
-	}
 }
 
 NSArray* TSURLScheme(void)
@@ -243,569 +183,6 @@ void setTSURLSchemeState(BOOL newState, NSString* customAppPath)
 		[trollStoreInfoDictM.copy writeToURL:[NSURL fileURLWithPath:outPath] error:nil];
 	}
 }
-
-#ifdef TROLLSTORE_LITE
-
-BOOL isLdidInstalled(void)
-{
-	// Since TrollStore Lite depends on ldid, we assume it exists
-	return YES;
-}
-
-NSString *getLdidPath(void)
-{
-	return JBROOT_PATH(@"/usr/bin/ldid");
-}
-
-#else
-
-void installLdid(NSString* ldidToCopyPath, NSString* ldidVersion)
-{
-	if(![[NSFileManager defaultManager] fileExistsAtPath:ldidToCopyPath]) return;
-
-	NSString* ldidPath = [trollStoreAppPath() stringByAppendingPathComponent:@"ldid"];
-	NSString* ldidVersionPath = [trollStoreAppPath() stringByAppendingPathComponent:@"ldid.version"];
-
-	if([[NSFileManager defaultManager] fileExistsAtPath:ldidPath])
-	{
-		[[NSFileManager defaultManager] removeItemAtPath:ldidPath error:nil];
-	}
-
-	[[NSFileManager defaultManager] copyItemAtPath:ldidToCopyPath toPath:ldidPath error:nil];
-
-	NSData* ldidVersionData = [ldidVersion dataUsingEncoding:NSUTF8StringEncoding];
-	[ldidVersionData writeToFile:ldidVersionPath atomically:YES];
-
-	chmod(ldidPath.fileSystemRepresentation, 0755);
-	chmod(ldidVersionPath.fileSystemRepresentation, 0644);
-}
-
-BOOL isLdidInstalled(void)
-{
-	NSString* ldidPath = [trollStoreAppPath() stringByAppendingPathComponent:@"ldid"];
-	return [[NSFileManager defaultManager] fileExistsAtPath:ldidPath];
-}
-
-NSString *getLdidPath(void)
-{
-	return [trollStoreAppPath() stringByAppendingPathComponent:@"ldid"];
-}
-
-#endif
-
-int runLdid(NSArray* args, NSString** output, NSString** errorOutput)
-{
-	NSString* ldidPath = getLdidPath();
-	NSMutableArray* argsM = args.mutableCopy ?: [NSMutableArray new];
-	[argsM insertObject:ldidPath.lastPathComponent atIndex:0];
-
-	NSUInteger argCount = [argsM count];
-	char **argsC = (char **)malloc((argCount + 1) * sizeof(char*));
-
-	for (NSUInteger i = 0; i < argCount; i++)
-	{
-		argsC[i] = strdup([[argsM objectAtIndex:i] UTF8String]);
-	}
-	argsC[argCount] = NULL;
-
-	posix_spawn_file_actions_t action;
-	posix_spawn_file_actions_init(&action);
-
-	int outErr[2];
-	pipe(outErr);
-	posix_spawn_file_actions_adddup2(&action, outErr[1], STDERR_FILENO);
-	posix_spawn_file_actions_addclose(&action, outErr[0]);
-
-	int out[2];
-	pipe(out);
-	posix_spawn_file_actions_adddup2(&action, out[1], STDOUT_FILENO);
-	posix_spawn_file_actions_addclose(&action, out[0]);
-	
-	pid_t task_pid;
-	int status = -200;
-	NSLog(@"About to spawn ldid (%@) with args %@", ldidPath, args);
-	int spawnError = posix_spawn(&task_pid, [ldidPath fileSystemRepresentation], &action, NULL, (char* const*)argsC, NULL);
-	for (NSUInteger i = 0; i < argCount; i++)
-	{
-		free(argsC[i]);
-	}
-	free(argsC);
-
-	if(spawnError != 0)
-	{
-		NSLog(@"ldid failed to spawn with error %d (%s)\n", spawnError, strerror(spawnError));
-		return spawnError;
-	}
-
-	do
-	{
-		if (waitpid(task_pid, &status, 0) != -1) {
-			//printf("Child status %dn", WEXITSTATUS(status));
-		} else
-		{
-			perror("waitpid");
-			return -222;
-		}
-	} while (!WIFEXITED(status) && !WIFSIGNALED(status));
-
-	close(outErr[1]);
-	close(out[1]);
-
-	NSString* ldidOutput = getNSStringFromFile(out[0]);
-	if(output)
-	{
-		*output = ldidOutput;
-	}
-
-	NSString* ldidErrorOutput = getNSStringFromFile(outErr[0]);
-	if(errorOutput)
-	{
-		*errorOutput = ldidErrorOutput;
-	}
-
-	return WEXITSTATUS(status);
-}
-
-BOOL certificateHasDataForExtensionOID(SecCertificateRef certificate, CFStringRef oidString)
-{
-	if(certificate == NULL || oidString == NULL)
-	{
-		NSLog(@"[certificateHasDataForExtensionOID] attempted to check null certificate or OID");
-		return NO;
-	}
-	
-	CFDataRef extensionData = SecCertificateCopyExtensionValue(certificate, oidString, NULL);
-	if(extensionData != NULL)
-	{
-		CFRelease(extensionData);
-		return YES;
-	}
-	
-	return NO;
-}
-
-BOOL codeCertChainContainsFakeAppStoreExtensions(SecStaticCodeRef codeRef)
-{
-	if(codeRef == NULL)
-	{
-		NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] attempted to check cert chain of null static code object");
-		return NO;
-	}
-	
-	CFDictionaryRef signingInfo = NULL;
-	OSStatus result;
-  
-	result = SecCodeCopySigningInformation(codeRef, kSecCSSigningInformation, &signingInfo);
-
-	if(result != errSecSuccess)
-	{
-		NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] failed to copy signing info from static code");
-		return NO;
-	}
-	
-	CFArrayRef certificates = CFDictionaryGetValue(signingInfo, kSecCodeInfoCertificates);
-	if(certificates == NULL || CFArrayGetCount(certificates) == 0)
-	{
-		return NO;
-	}
-
-	// If we match the standard Apple policy, we are signed properly, but we haven't been deliberately signed with a custom root
-	
-	SecPolicyRef appleAppStorePolicy = SecPolicyCreateWithProperties(kSecPolicyAppleiPhoneApplicationSigning, NULL);
-
-	SecTrustRef trust = NULL;
-	SecTrustCreateWithCertificates(certificates, appleAppStorePolicy, &trust);
-
-	if(SecTrustEvaluateWithError(trust, nil))
-	{
-		CFRelease(trust);
-		CFRelease(appleAppStorePolicy);
-		CFRelease(signingInfo);
-		
-		NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] found certificate extension, but was issued by Apple (App Store)");
-		return NO;
-	}
-
-	// We haven't matched Apple, so keep going. Is the app profile signed?
-		
-	CFRelease(appleAppStorePolicy);
-	
-	SecPolicyRef appleProfileSignedPolicy = SecPolicyCreateWithProperties(kSecPolicyAppleiPhoneProfileApplicationSigning, NULL);
-	if(SecTrustSetPolicies(trust, appleProfileSignedPolicy) != errSecSuccess)
-	{
-		NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] error replacing trust policy to check for profile-signed app");
-		CFRelease(trust);
-		CFRelease(signingInfo);
-		return NO;
-	}
-		
-	if(SecTrustEvaluateWithError(trust, nil))
-	{
-		CFRelease(trust);
-		CFRelease(appleProfileSignedPolicy);
-		CFRelease(signingInfo);
-		
-		NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] found certificate extension, but was issued by Apple (profile-signed)");
-		return NO;
-	}
-	
-	// Still haven't matched Apple. Are we using a custom root that would take the App Store fastpath?
-	CFRelease(appleProfileSignedPolicy);
-	
-	// Cert chain should be of length 3
-	if(CFArrayGetCount(certificates) != 3)
-	{
-		CFRelease(signingInfo);
-		
-		NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] certificate chain length != 3");
-		return NO;
-	}
-		
-	// AppleCodeSigning only checks for the codeSigning EKU by default
-	SecPolicyRef customRootPolicy = SecPolicyCreateWithProperties(kSecPolicyAppleCodeSigning, NULL);
-	SecPolicySetOptionsValue(customRootPolicy, CFSTR("LeafMarkerOid"), CFSTR("1.2.840.113635.100.6.1.3"));
-	
-	if(SecTrustSetPolicies(trust, customRootPolicy) != errSecSuccess)
-	{
-		NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] error replacing trust policy to check for custom root");
-		CFRelease(trust);
-		CFRelease(signingInfo);
-		return NO;
-	}
-
-	// Need to add our certificate chain to the anchor as it is expected to be a self-signed root
-	SecTrustSetAnchorCertificates(trust, certificates);
-	
-	BOOL evaluatesToCustomAnchor = SecTrustEvaluateWithError(trust, nil);
-	NSLog(@"[codeCertChainContainsFakeAppStoreExtensions] app signed with non-Apple certificate %@ using valid custom certificates", evaluatesToCustomAnchor ? @"IS" : @"is NOT");
-	
-	CFRelease(trust);
-	CFRelease(customRootPolicy);
-	CFRelease(signingInfo);
-	
-	return evaluatesToCustomAnchor;
-}
-
-BOOL isSameFile(NSString *path1, NSString *path2)
-{
-	struct stat sb1;
-	struct stat sb2;
-	stat(path1.fileSystemRepresentation, &sb1);
-	stat(path2.fileSystemRepresentation, &sb2);
-	return sb1.st_ino == sb2.st_ino;
-}
-
-#ifdef EMBEDDED_ROOT_HELPER
-// The embedded root helper is not able to sign apps
-// But it does not need that functionality anyways
-int signApp(NSString* appPath)
-{
-	return -1;
-}
-#else
-int signAdhoc(NSString *filePath, NSDictionary *entitlements)
-{
-	//if (@available(iOS 16, *)) {
-	//	return codesign_sign_adhoc(filePath.fileSystemRepresentation, true, entitlements);
-	//}
-	// If iOS 14 is so great, how come there is no iOS 14 2?????
-	//else {
-		if(!isLdidInstalled()) return 173;
-
-		NSString *entitlementsPath = nil;
-		NSString *signArg = @"-s";
-		NSString* errorOutput;
-		if(entitlements)
-		{
-			NSData *entitlementsXML = [NSPropertyListSerialization dataWithPropertyList:entitlements format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
-			if (entitlementsXML) {
-				entitlementsPath = [[NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString] stringByAppendingPathExtension:@"plist"];
-				[entitlementsXML writeToFile:entitlementsPath atomically:NO];
-				signArg = [@"-S" stringByAppendingString:entitlementsPath];
-			}
-			
-		}
-		int ldidRet = runLdid(@[signArg, filePath], nil, &errorOutput);
-		if (entitlementsPath) {
-			[[NSFileManager defaultManager] removeItemAtPath:entitlementsPath error:nil];
-		}
-
-		NSLog(@"ldid exited with status %d", ldidRet);
-
-		NSLog(@"- ldid error output start -");
-
-		printMultilineNSString(errorOutput);
-
-		NSLog(@"- ldid error output end -");
-
-		if(ldidRet == 0)
-		{
-			return 0;
-		}
-		else
-		{
-			return 175;
-		}
-	//}
-}
-
-int signApp(NSString* appPath)
-{
-	NSDictionary* appInfoDict = infoDictionaryForAppPath(appPath);
-	if(!appInfoDict) return 172;
-
-	NSString* mainExecutablePath = appMainExecutablePathForAppPath(appPath);
-	if(!mainExecutablePath) return 176;
-
-	if(![[NSFileManager defaultManager] fileExistsAtPath:mainExecutablePath]) return 174;
-
-#ifndef TROLLSTORE_LITE
-	// Check if the bundle has had a supported exploit pre-applied
-	EXPLOIT_TYPE declaredPreAppliedExploitType = getDeclaredExploitTypeFromInfoDictionary(appInfoDict);
-	if(isPlatformVulnerableToExploitType(declaredPreAppliedExploitType))
-	{
-		NSLog(@"[signApp] taking fast path for app which declares use of a supported pre-applied exploit (%@)", mainExecutablePath);
-		return 0;
-	}
-	else if (declaredPreAppliedExploitType != 0)
-	{
-		NSLog(@"[signApp] app (%@) declares use of a pre-applied exploit that is not supported on this device. Proceeding to re-sign...", mainExecutablePath);
-	}
-
-	// If the app doesn't declare a pre-applied exploit, and the host supports fake custom root certs,
-	// we can also skip doing any work here when that app is signed with fake roots
-	// If not, with the new bypass, a previously modified binary should failed to be adhoc signed, and
-	// reapplying the bypass should produce an identical binary
-	if(isPlatformVulnerableToExploitType(EXPLOIT_TYPE_CUSTOM_ROOT_CERTIFICATE_V1))
-	{
-		SecStaticCodeRef codeRef = getStaticCodeRef(mainExecutablePath);
-		if(codeRef != NULL)
-		{
-			if(codeCertChainContainsFakeAppStoreExtensions(codeRef))
-			{
-				NSLog(@"[signApp] taking fast path for app signed using a custom root certificate (%@)", mainExecutablePath);
-				CFRelease(codeRef);
-				return 0;
-			}
-
-			CFRelease(codeRef);
-		}
-	}
-
-	// On iOS 16+, binaries with certain entitlements requires developer mode to be enabled, so we'll check
-	// while we're fixing entitlements
-	BOOL requiresDevMode = NO;
-#endif
-
-	// The majority of IPA decryption utilities only decrypt the main executable of the app bundle
-	// As a result, we cannot bail on the entire app if an additional binary is encrypted (e.g. app extensions)
-	// Instead, we will display a warning to the user, and warn them that the app may not work properly
-	BOOL hasAdditionalEncryptedBinaries = NO;
-
-	NSURL* fileURL;
-	NSDirectoryEnumerator *enumerator;
-
-	// Due to how the new CT bug works, in order for data containers to work properly we need to add the
-	// com.apple.private.security.container-required=<bundle-identifier> entitlement to every binary inside a bundle
-	// For this we will want to first collect info about all the bundles in the app by seeking for Info.plist files and adding the ent to the main binary
-	enumerator = [[NSFileManager defaultManager] enumeratorAtURL:[NSURL fileURLWithPath:appPath] includingPropertiesForKeys:nil options:0 errorHandler:nil];
-	while(fileURL = [enumerator nextObject])
-	{
-		NSString *filePath = fileURL.path;
-		if ([filePath.lastPathComponent isEqualToString:@"Info.plist"]) {
-			NSDictionary *infoDict = [NSDictionary dictionaryWithContentsOfFile:filePath];
-			if (!infoDict) continue;
-			NSString *bundleId = infoDict[@"CFBundleIdentifier"];
-			NSString *bundleExecutable = infoDict[@"CFBundleExecutable"];
-			if (!bundleId || !bundleExecutable) continue;
-			if ([bundleId isEqualToString:@""] || [bundleExecutable isEqualToString:@""]) continue;
-			NSString *bundleMainExecutablePath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:bundleExecutable];
-			if (![[NSFileManager defaultManager] fileExistsAtPath:bundleMainExecutablePath]) continue;
-
-			NSString *packageType = infoDict[@"CFBundlePackageType"];
-
-			// We don't care about frameworks (yet)
-			if ([packageType isEqualToString:@"FMWK"]) continue;
-
-			NSMutableDictionary *entitlementsToUse = dumpEntitlementsFromBinaryAtPath(bundleMainExecutablePath).mutableCopy;
-			if (isSameFile(bundleMainExecutablePath, mainExecutablePath)) {
-				// In the case where the main executable of the app currently has no entitlements at all
-				// We want to ensure it gets signed with fallback entitlements
-				// These mimic the entitlements that Xcodes gives every app it signs
-				if (!entitlementsToUse) {
-					entitlementsToUse = @{
-						@"application-identifier" : @"TROLLTROLL.*",
-						@"com.apple.developer.team-identifier" : @"TROLLTROLL",
-						@"get-task-allow" : (__bridge id)kCFBooleanTrue,
-						@"keychain-access-groups" : @[
-							@"TROLLTROLL.*",
-							@"com.apple.token"
-						],
-					}.mutableCopy;
-				}
-			}
-
-			if (!entitlementsToUse) entitlementsToUse = [NSMutableDictionary new];
-
-#ifndef TROLLSTORE_LITE
-			// Developer mode does not exist before iOS 16
-			if (@available(iOS 16, *)){
-				if (!requiresDevMode) {
-					for (NSString* restrictedEntitlementKey in @[
-						@"get-task-allow", 
-						@"task_for_pid-allow", 
-						@"com.apple.system-task-ports",
-						@"com.apple.system-task-ports.control",
-						@"com.apple.system-task-ports.token.control",
-						@"com.apple.private.cs.debugger"
-					]) {
-						NSObject *restrictedEntitlement = entitlementsToUse[restrictedEntitlementKey];
-						if (restrictedEntitlement && [restrictedEntitlement isKindOfClass:[NSNumber class]] && [(NSNumber *)restrictedEntitlement boolValue]) {
-							requiresDevMode = YES;
-						}
-					}
-				}
-			}
-
-			NSObject *containerRequiredO = entitlementsToUse[@"com.apple.private.security.container-required"];
-			BOOL containerRequired = YES;
-			if (containerRequiredO && [containerRequiredO isKindOfClass:[NSNumber class]]) {
-				containerRequired = [(NSNumber *)containerRequiredO boolValue];
-			}
-			else if (containerRequiredO && [containerRequiredO isKindOfClass:[NSString class]]) {
-				// Keep whatever is in it if it's a string...
-				containerRequired = NO;
-			}
-
-			if (containerRequired) {
-				NSObject *noContainerO = entitlementsToUse[@"com.apple.private.security.no-container"];
-				BOOL noContainer = NO;
-				if (noContainerO && [noContainerO isKindOfClass:[NSNumber class]]) {
-					noContainer = [(NSNumber *)noContainerO boolValue];
-				}
-				NSObject *noSandboxO = entitlementsToUse[@"com.apple.private.security.no-sandbox"];
-				BOOL noSandbox = NO;
-				if (noSandboxO && [noSandboxO isKindOfClass:[NSNumber class]]) {
-					noSandbox = [(NSNumber *)noSandboxO boolValue];
-				}
-				if (!noContainer && !noSandbox) {
-					entitlementsToUse[@"com.apple.private.security.container-required"] = bundleId;
-				}
-			}
-#else
-			// Since TrollStore Lite adhoc signs stuff, this means that on PMAP_CS devices, it will run with "PMAP_CS_IN_LOADED_TRUST_CACHE" trust level
-			// We need to overwrite it so that the app runs as expected (Dopamine 2.1.5+ feature)
-			entitlementsToUse[@"jb.pmap_cs.custom_trust"] = @"PMAP_CS_APP_STORE";
-#endif
-
-			int r = signAdhoc(bundleMainExecutablePath, entitlementsToUse);
-			if (r != 0) return r;
-		}
-	}
-
-	// All entitlement related issues should be fixed at this point, so all we need to do is sign the entire bundle
-	// And then apply the CoreTrust bypass to all executables
-	// XXX: This only works because we're using ldid at the moment and that recursively signs everything
-	int r = signAdhoc(appPath, nil);
-	if (r != 0) return r;
-
-#ifndef TROLLSTORE_LITE
-	// Apply CoreTrust bypass
-	enumerator = [[NSFileManager defaultManager] enumeratorAtURL:[NSURL fileURLWithPath:appPath] includingPropertiesForKeys:nil options:0 errorHandler:nil];
-	while(fileURL = [enumerator nextObject])
-	{
-		NSString *filePath = fileURL.path;
-		FAT *fat = fat_init_from_path(filePath.fileSystemRepresentation);
-		if (fat) {
-			NSLog(@"%@ is binary", filePath);
-			MachO *machoForExtraction = fat_find_preferred_slice(fat);
-			if (machoForExtraction) {
-				// Extract best slice
-				NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
-				MemoryStream *sliceStream = macho_get_stream(machoForExtraction);
-				MemoryStream *sliceOutStream = file_stream_init_from_path(tmpPath.fileSystemRepresentation, 0, 0, FILE_STREAM_FLAG_WRITABLE | FILE_STREAM_FLAG_AUTO_EXPAND);
-				if (sliceOutStream) {
-					memory_stream_copy_data(sliceStream, 0, sliceOutStream, 0, memory_stream_get_size(sliceStream));
-					memory_stream_free(sliceOutStream);
-
-					// Now we have the best slice at tmpPath, which we will apply the bypass to, then copy it over the original file
-					// We loose all other slices doing that but they aren't a loss as they wouldn't run either way
-					NSLog(@"[%@] Applying CoreTrust bypass...", filePath);
-					int r = apply_coretrust_bypass(tmpPath.fileSystemRepresentation);
-					if (r == 0) {
-						NSLog(@"[%@] Applied CoreTrust bypass!", filePath);
-					}
-					else if (r == 2) {
-						NSLog(@"[%@] Cannot apply CoreTrust bypass on an encrypted binary!", filePath);
-						if (isSameFile(filePath, mainExecutablePath)) {
-							// If this is the main binary, this error is fatal
-							NSLog(@"[%@] Main binary is encrypted, cannot continue!", filePath);
-							fat_free(fat);
-							return 180;
-						}
-						else {
-							// If not, we can continue but want to show a warning after the app is installed
-							hasAdditionalEncryptedBinaries = YES;
-						}
-					} else if (r == 3) { // Non-fatal - unsupported MachO type
-						NSLog(@"[%@] Cannot apply CoreTrust bypass on an unsupported MachO type!", filePath);
-					}
-					else {
-						NSLog(@"[%@] CoreTrust bypass failed!!! :(", filePath);
-						fat_free(fat);
-						return 185;
-					}
-
-					// tempFile is now signed, overwrite original file at filePath with it
-					[[NSFileManager defaultManager] removeItemAtPath:filePath error:nil];
-					[[NSFileManager defaultManager] moveItemAtPath:tmpPath toPath:filePath error:nil];
-				}
-			}
-			fat_free(fat);
-		}
-	}
-
-	if (requiresDevMode) {
-		// Postpone trying to enable dev mode until after the app is (successfully) installed
-		return 182;
-	}
-#else // TROLLSTORE_LITE
-	// Just check for whether anything is fairplay encrypted
-	enumerator = [[NSFileManager defaultManager] enumeratorAtURL:[NSURL fileURLWithPath:appPath] includingPropertiesForKeys:nil options:0 errorHandler:nil];
-	while(fileURL = [enumerator nextObject])
-	{
-		NSString *filePath = fileURL.path;
-		FAT *fat = fat_init_from_path(filePath.fileSystemRepresentation);
-		if (fat) {
-			NSLog(@"%@ is binary", filePath);
-			MachO *macho = fat_find_preferred_slice(fat);
-			if (macho) {
-				if (macho_is_encrypted(macho)) {
-					NSLog(@"[%@] Cannot apply CoreTrust bypass on an encrypted binary!", filePath);
-					if (isSameFile(filePath, mainExecutablePath)) {
-						// If this is the main binary, this error is fatal
-						NSLog(@"[%@] Main binary is encrypted, cannot continue!", filePath);
-						fat_free(fat);
-						return 180;
-					}
-					else {
-						// If not, we can continue but want to show a warning after the app is installed
-						hasAdditionalEncryptedBinaries = YES;
-					}
-				}
-			}
-			fat_free(fat);
-		}
-	}
-#endif
-
-	if (hasAdditionalEncryptedBinaries) {
-		return 184;
-	}
-
-	return 0;
-}
-#endif
 
 void applyPatchesToInfoDictionary(NSString* appPath)
 {
@@ -1155,6 +532,9 @@ int uninstallApp(NSString* appPath, NSString* appId, BOOL useCustomMethod)
 	if(deleteSuc)
 	{
 		cleanRestrictions();
+		notify_post("com.apple.LaunchServices.ApplicationsChanged");
+		notify_post("com.annibale.var_save");
+		sync();
 		return 0;
 	}
 	else
@@ -1194,7 +574,8 @@ int installIpa(NSString* ipaPath, BOOL force, BOOL useInstalldMethod, BOOL skipU
 {
 	cleanRestrictions();
 
-	if(![[NSFileManager defaultManager] fileExistsAtPath:ipaPath]) return 166;
+	BOOL isDir = NO;
+	if(![[NSFileManager defaultManager] fileExistsAtPath:ipaPath isDirectory:&isDir]) return 166;
 
 	BOOL suc = NO;
 	NSString* tmpPackagePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
@@ -1202,11 +583,21 @@ int installIpa(NSString* ipaPath, BOOL force, BOOL useInstalldMethod, BOOL skipU
 	suc = [[NSFileManager defaultManager] createDirectoryAtPath:tmpPackagePath withIntermediateDirectories:NO attributes:nil error:nil];
 	if(!suc) return 1;
 
-	int extractRet = extract(ipaPath, tmpPackagePath);
-	if(extractRet != 0)
-	{
-		[[NSFileManager defaultManager] removeItemAtPath:tmpPackagePath error:nil];
-		return 168;
+	if (isDir && [ipaPath.pathExtension.lowercaseString isEqualToString:@"app"]) {
+		NSString *payloadDir = [tmpPackagePath stringByAppendingPathComponent:@"Payload"];
+		[[NSFileManager defaultManager] createDirectoryAtPath:payloadDir withIntermediateDirectories:YES attributes:nil error:nil];
+		NSString *dstApp = [payloadDir stringByAppendingPathComponent:ipaPath.lastPathComponent];
+		if (![[NSFileManager defaultManager] copyItemAtPath:ipaPath toPath:dstApp error:nil]) {
+			[[NSFileManager defaultManager] removeItemAtPath:tmpPackagePath error:nil];
+			return 168;
+		}
+	} else {
+		int extractRet = extract(ipaPath, tmpPackagePath);
+		if(extractRet != 0)
+		{
+			[[NSFileManager defaultManager] removeItemAtPath:tmpPackagePath error:nil];
+			return 168;
+		}
 	}
 
 	int ret = installApp(tmpPackagePath, YES, force, NO, useInstalldMethod, skipUICache);
@@ -1542,21 +933,83 @@ int MAIN_NAME(int argc, char *argv[], char *envp[])
 		NSString* cmd = args.firstObject;
 		if([cmd isEqualToString:@"install"])
 		{
-			if(args.count < 2) return -3;
-			// use system method when specified, otherwise use custom method
+			NSString *ipaPath = nil;
+			if (args.count >= 2) {
+				ipaPath = args.lastObject;
+			} else {
+				const char *envPath = getenv("IPA_PATH") ?: getenv("K90_IPA");
+				if (envPath && envPath[0]) {
+					ipaPath = [NSString stringWithUTF8String:envPath];
+				}
+			}
+			if (!ipaPath.length) return -3;
 			BOOL useInstalldMethod = [args containsObject:@"installd"];
-			BOOL force = [args containsObject:@"force"];
+			BOOL explicitMethod = [args containsObject:@"custom"] || [args containsObject:@"installd"];
+			BOOL force = [args containsObject:@"force"] || !explicitMethod;
 			BOOL skipUICache = [args containsObject:@"skip-uicache"];
-			NSString* ipaPath = args.lastObject;
 			ret = installIpa(ipaPath, force, useInstalldMethod, skipUICache);
+			if (!explicitMethod) {
+				if (ret == 0 || ret == 182 || ret == 184) {
+					printf("trollstorehelper: installed %s\n", ipaPath.UTF8String);
+					ret = 0;
+				} else {
+					fprintf(stderr, "trollstorehelper: install %s failed (%d)\n", ipaPath.UTF8String, ret);
+				}
+			}
 		}
-		else if([cmd isEqualToString:@"uninstall"])
+		else if([cmd isEqualToString:@"uninstall"] || [cmd isEqualToString:@"remove"])
 		{
 			if(args.count < 2) return -3;
-			// use custom method when specified, otherwise use system method
-			BOOL useCustomMethod = [args containsObject:@"custom"];
+			BOOL useCustomMethod = [args containsObject:@"custom"] || [cmd isEqualToString:@"remove"] || args.count == 2;
 			NSString* appId = args.lastObject;
 			ret = uninstallAppById(appId, useCustomMethod);
+		}
+		else if([cmd isEqualToString:@"list"])
+		{
+			listInstalledApps();
+		}
+		else if([cmd isEqualToString:@"open"])
+		{
+			if(args.count < 2) return -3;
+			NSString *bid = args.lastObject;
+			BOOL ok = [[LSApplicationWorkspace defaultWorkspace] openApplicationWithBundleID:bid];
+			printf("trollstorehelper: %s %s\n", bid.UTF8String, ok ? "opened" : "NOT OPENED");
+			ret = ok ? 0 : 1;
+		}
+		else if([cmd isEqualToString:@"url"])
+		{
+			if(args.count < 2) return -3;
+			NSString *urlStr = args.lastObject;
+			NSURL *u = [NSURL URLWithString:urlStr];
+			BOOL ok = u ? [[LSApplicationWorkspace defaultWorkspace] openURL:u] : NO;
+			printf("trollstorehelper: url %s %s\n", urlStr.UTF8String, ok ? "opened" : "FAILED");
+			ret = ok ? 0 : 1;
+		}
+		else if([cmd isEqualToString:@"register-system"] || [cmd isEqualToString:@"register"] || [cmd isEqualToString:@"ensure-trollstore"])
+		{
+			ret = ensureTrollStoreInstalled();
+		}
+		else if([cmd isEqualToString:@"watch"])
+		{
+			ensureTrollStoreInstalled();
+			NSFileManager *fm = [NSFileManager defaultManager];
+			NSString *watchDir = @"/private/var/tmp/ipa";
+			[fm createDirectoryAtPath:watchDir withIntermediateDirectories:YES attributes:nil error:nil];
+			chmod(watchDir.fileSystemRepresentation, 01777);
+			for (;;) {
+				@autoreleasepool {
+					for (NSString *item in [fm contentsOfDirectoryAtPath:watchDir error:nil]) {
+						if (![item.pathExtension.lowercaseString isEqualToString:@"ipa"]) continue;
+						if ([item hasPrefix:@"."]) continue;
+						NSString *path = [watchDir stringByAppendingPathComponent:item];
+						int r = installIpa(path, YES, NO, NO);
+						if (r == 0 || r == 182 || r == 184) {
+							[fm removeItemAtPath:path error:nil];
+						}
+					}
+				}
+				sleep(2);
+			}
 		}
 		else if([cmd isEqualToString:@"uninstall-path"])
 		{

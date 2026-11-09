@@ -21,7 +21,9 @@
 				void (^doneBlock)(BOOL) = ^(BOOL shouldExit)
 				{
 					[url stopAccessingSecurityScopedResource];
-					[[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+					if ([url.path containsString:@"/Inbox/"] || [url.path hasPrefix:NSTemporaryDirectory()]) {
+						[[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+					}
 
 					if(shouldExit)
 					{
@@ -130,19 +132,7 @@
 // or if it's the one from an old TrollStore version that's no longer supported
 - (void)handleLdidCheck
 {
-#ifndef TROLLSTORE_LITE
-	//if (@available(iOS 16, *)) {} else {
-		NSString* tsAppPath = [NSBundle mainBundle].bundlePath;
-
-		NSString* ldidPath = [tsAppPath stringByAppendingPathComponent:@"ldid"];
-		NSString* ldidVersionPath = [tsAppPath stringByAppendingPathComponent:@"ldid.version"];
-
-		if(![[NSFileManager defaultManager] fileExistsAtPath:ldidPath] || ![[NSFileManager defaultManager] fileExistsAtPath:ldidVersionPath])
-		{
-			[TSInstallationController installLdid];
-		}
-	//}
-#endif
+	/* Built-in Mach-O signing is provided by trollstorehelper. */
 }
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
